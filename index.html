@@ -1,0 +1,233 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>SwampGatorScanner - Full Prototype</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #111; color: #eee; padding: 20px; }
+    h1, h2 { color: #00ff88; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    th, td { padding: 8px 12px; border: 1px solid #444; text-align: center; }
+    th { background-color: #222; color: #00ff88; }
+    tr:nth-child(even) { background-color: #1a1a1a; }
+    .btn { padding: 4px 10px; background: #00ff88; color: #000; border: none; cursor: pointer; }
+  </style>
+</head>
+
+  <body>
+    <h2>Filter Pairs</h2>
+    <select id="marginFilter" onchange="fetchBinanceData()">
+      <option value="all">All</option>
+      <option value="spot">Spot Only</option>
+      <option value="margin">Margin Only</option>
+    </select>
+
+  <h1>SwampGatorScanner - Top Movers</h1>
+  <p>Binance data, Kraken names. Updates every 20 seconds.</p>
+
+  <table id="topTable">
+    <thead>
+      <tr>
+        <th>Kraken Symbol</th>
+        <th>Binance Symbol</th>
+        <th>1m %</th>
+        <th>5m %</th>
+        <th>15m %</th>
+        <th>Price</th>
+        <th>Watch</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Watchlist - Real-Time (Kraken WebSocket)</h2>
+  <table id="watchlistTable">
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th>Price</th>
+        <th>Change</th>
+        <th>Remove</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    const THRESHOLDS = {
+      change_1m: 0.5,
+      change_5m: 1.2,
+      change_15m: 2.0
+    };
+
+    let symbolMap = {};
+    let watchlist = {};
+    let krakenWS = null;
+
+    async function loadSymbolMap() {
+      const res = await fetch('symbol_map.json');
+      symbolMap = await res.json();
+    }
+
+    async function fetchBinanceData() {
+      const url = 'https://api.binance.com/api/v3/ticker/24hr';
+      const res = await fetch(url);
+      const allData = await res.json();
+      const matches = [];
+
+      for (let entry of allData) {
+        const symbol = entry.symbol;
+        if (!symbol.endsWith("USDT")) continue;
+        if (!(symbol in symbolMap)) continue;
+
+        const open = parseFloat(entry.openPrice);
+        const last = parseFloat(entry.lastPrice);
+        const percentChange = ((last - open) / open) * 100;
+
+        const change_1m = percentChange * 0.25;
+        const change_5m = percentChange * 0.5;
+        const change_15m = percentChange;
+
+        if (
+          change_1m >= THRESHOLDS.change_1m &&
+          change_5m >= THRESHOLDS.change_5m &&
+          change_15m >= THRESHOLDS.change_15m
+        ) {
+          const krakenSymbol = symbolMap[symbol];
+          matches.push({
+            krakenSymbol,
+            binanceSymbol: symbol,
+            change_1m,
+            change_5m,
+            change_15m,
+            price: last
+          });
+        }
+      }
+
+      
+    const filter = document.getElementById('marginFilter').value;
+    const filtered = matches.filter(c => {
+      if (filter === "spot") return !c.margin;
+      if (filter === "margin") return c.margin;
+      return true;
+    });
+    renderTopTable(filtered);
+
+    }
+
+    function 
+renderTopTable(coins) {
+  const cleanLabel = (kraken, margin) => {
+    const base = kraken.replace(/^X?([A-Z]+)[Z$]?USD$/, '$1');
+    return margin ? base + "_xX" : base;
+  };
+
+      const tbody = document.querySelector('#topTable tbody');
+      tbody.innerHTML = '';
+      for (let coin of coins) {
+        const row = document.createElement('tr');
+        row.innerHTML = `
+          <td>${cleanLabel(coin.krakenSymbol, coin.margin)}</td>
+          <td>${coin.binanceSymbol}</td>
+          <td>${coin.change_1m.toFixed(2)}%</td>
+          <td>${coin.change_5m.toFixed(2)}%</td>
+          <td>${coin.change_15m.toFixed(2)}%</td>
+          <td>$${parseFloat(coin.price).toFixed(4)}</td>
+          <td><button class="btn" onclick="addToWatchlist('${coin.krakenSymbol}')">Add</button></td>
+        `;
+        tbody.appendChild(row);
+      }
+    }
+
+    function addToWatchlist(symbol) {
+      if (watchlist[symbol]) return; // already watching
+      watchlist[symbol] = { price: '-', change: '-' };
+      subscribeKraken(symbol);
+      renderWatchlist();
+    }
+
+    function removeFromWatchlist(symbol) {
+      delete watchlist[symbol];
+      unsubscribeKraken(symbol);
+      renderWatchlist();
+    }
+
+    function renderWatchlist() {
+      const tbody = document.querySelector('#watchlistTable tbody');
+      tbody.innerHTML = '';
+      for (let symbol in watchlist) {
+        const row = document.createElement('tr');
+        row.innerHTML = `
+          <td>${symbol}</td>
+          <td>${watchlist[symbol].price}</td>
+          <td>${watchlist[symbol].change}</td>
+          <td><button class="btn" onclick="removeFromWatchlist('${symbol}')">Remove</button></td>
+        `;
+        tbody.appendChild(row);
+      }
+    }
+
+    function subscribeKraken(symbol) {
+      if (!krakenWS) {
+        krakenWS = new WebSocket('wss://ws.kraken.com');
+        krakenWS.onmessage = handleKrakenMessage;
+        krakenWS.onopen = () => {
+          for (let sym in watchlist) {
+            krakenWS.send(JSON.stringify({
+              event: "subscribe",
+              pair: [sym],
+              subscription: { name: "ticker" }
+            }));
+          }
+        };
+      } else {
+        krakenWS.send(JSON.stringify({
+          event: "subscribe",
+          pair: [symbol],
+          subscription: { name: "ticker" }
+        }));
+      }
+    }
+
+    function unsubscribeKraken(symbol) {
+      if (krakenWS) {
+        krakenWS.send(JSON.stringify({
+          event: "unsubscribe",
+          pair: [symbol],
+          subscription: { name: "ticker" }
+        }));
+      }
+    }
+
+    function handleKrakenMessage(event) {
+      try {
+        const data = JSON.parse(event.data);
+        if (!Array.isArray(data)) return;
+        const [channelID, details, , symbol] = data;
+        if (!symbol || !details.c) return;
+
+        const price = parseFloat(details.c[0]).toFixed(4);
+        const change = ((parseFloat(details.c[0]) - parseFloat(details.o[1])) / parseFloat(details.o[1]) * 100).toFixed(2);
+
+        if (watchlist[symbol]) {
+          watchlist[symbol].price = `$${price}`;
+          watchlist[symbol].change = `${change}%`;
+          renderWatchlist();
+        }
+      } catch (e) {
+        console.error('WebSocket parse error', e);
+      }
+    }
+
+    async function startScanner() {
+      await loadSymbolMap();
+      await fetchBinanceData();
+      setInterval(fetchBinanceData, 20000);
+    }
+
+    startScanner();
+  </script>
+</body>
+</html>
