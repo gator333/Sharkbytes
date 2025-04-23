@@ -1,76 +1,96 @@
 
 /**
- * Symbol Mapper with margin flagging for Kraken pairs.
- * Matches Binance USDT assets with Kraken USD pairs.
- * Adds 'margin: true/false' for Kraken-side pairs.
+ * Enhanced Symbol Mapper for SwampGatorScanner
+ * - Compares Binance and Kraken symbols by base asset (e.g., BTC, ETH)
+ * - Outputs 3 lists: common coins, only in Binance, only in Kraken
+ * - Produces a downloadable symbol_map.json
+ * - Logs a comparison summary file for tracking historical diffs
  */
 
-async function getKrakenSymbols() {
-    const res = await fetch('https://api.kraken.com/0/public/AssetPairs');
-    const data = await res.json();
-    const pairs = data.result;
-
-    const krakenSymbols = {};
-    for (let key in pairs) {
-        const pair = pairs[key];
-        if (pair.wsname && pair.wsname.endsWith("/USD")) {
-            const name = pair.wsname.replace("/USD", "");
-            krakenSymbols[name.toUpperCase()] = {
-                kraken: key,
-                margin: pair.leverage_buy.length > 0 || pair.leverage_sell.length > 0
-            };
-        }
+async function fetchBinanceSymbols() {
+  const res = await fetch("https://api.binance.com/api/v3/exchangeInfo");
+  const data = await res.json();
+  const symbols = {};
+  for (let s of data.symbols) {
+    if (s.quoteAsset === "USDT" && s.status === "TRADING") {
+      symbols[s.baseAsset.toUpperCase()] = {
+        binanceSymbol: s.symbol,
+        name: s.baseAsset
+      };
     }
-    return krakenSymbols;
+  }
+  return symbols;
 }
 
-async function getBinanceSymbols() {
-    const res = await fetch('https://api.binance.com/api/v3/exchangeInfo');
-    const data = await res.json();
-    const binanceSymbols = {};
-
-    for (let symbol of data.symbols) {
-        if (symbol.quoteAsset === "USDT" && symbol.status === "TRADING") {
-            binanceSymbols[symbol.baseAsset.toUpperCase()] = symbol.symbol;
-        }
+async function fetchKrakenSymbols() {
+  const res = await fetch("https://api.kraken.com/0/public/AssetPairs");
+  const data = await res.json();
+  const symbols = {};
+  for (let key in data.result) {
+    const pair = data.result[key];
+    if (pair.wsname && pair.wsname.endsWith("/USD")) {
+      const base = pair.wsname.split("/")[0].toUpperCase();
+      symbols[base] = {
+        krakenSymbol: key,
+        name: base,
+        margin: (pair.leverage_buy && pair.leverage_buy.length > 0)
+      };
     }
-    return binanceSymbols;
+  }
+  return symbols;
 }
 
-async function refreshSymbolMap() {
-    const kraken = await getKrakenSymbols();
-    const binance = await getBinanceSymbols();
+async function buildSymbolMap() {
+  const binance = await fetchBinanceSymbols();
+  const kraken = await fetchKrakenSymbols();
 
-    const map = {};
-    const onlyInBinance = [];
-    const onlyInKraken = [];
+  const symbolMap = {};
+  const common = [];
+  const onlyBinance = [];
+  const onlyKraken = [];
 
-    for (let asset in binance) {
-        if (kraken[asset]) {
-            map[binance[asset]] = {
-                kraken: kraken[asset].kraken,
-                margin: kraken[asset].margin
-            };
-        } else {
-            onlyInBinance.push(binance[asset]);
-        }
+  for (let base in binance) {
+    if (kraken[base]) {
+      symbolMap[binance[base].binanceSymbol] = {
+        symbol: base,
+        name: base,
+        kraken: kraken[base].krakenSymbol,
+        margin: kraken[base].margin
+      };
+      common.push(base);
+    } else {
+      onlyBinance.push(base);
     }
+  }
 
-    for (let asset in kraken) {
-        if (!binance[asset]) {
-            onlyInKraken.push(kraken[asset].kraken);
-        }
+  for (let base in kraken) {
+    if (!binance[base]) {
+      onlyKraken.push(base);
     }
+  }
 
-    console.log("Symbol map updated:");
-    console.log(map);
-    console.log("Only in Binance:", onlyInBinance);
-    console.log("Only in Kraken:", onlyInKraken);
+  const summary = {
+    timestamp: new Date().toISOString(),
+    commonSymbols: common,
+    onlyOnBinance: onlyBinance,
+    onlyOnKraken: onlyKraken
+  };
 
-    const blob = new Blob([JSON.stringify(map, null, 4)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'symbol_map.json';
-    link.click();
+  const mapBlob = new Blob([JSON.stringify(symbolMap, null, 2)], { type: 'application/json' });
+  const summaryBlob = new Blob([JSON.stringify(summary, null, 2)], { type: 'application/json' });
+
+  const mapUrl = URL.createObjectURL(mapBlob);
+  const summaryUrl = URL.createObjectURL(summaryBlob);
+
+  const a1 = document.createElement('a');
+  a1.href = mapUrl;
+  a1.download = 'symbol_map.json';
+  a1.click();
+
+  const a2 = document.createElement('a');
+  a2.href = summaryUrl;
+  a2.download = 'symbol_map_summary.json';
+  a2.click();
+
+  console.log("Mapping complete. Files downloaded.");
 }
